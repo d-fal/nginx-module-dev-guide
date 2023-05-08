@@ -3,13 +3,11 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-static void *ngx_http_hello_body_create_loc_conf(ngx_conf_t *cf);
-static char *ngx_http_hello_body_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
+static void *ngx_http_auth_body_create_loc_conf(ngx_conf_t *cf);
+static char *ngx_http_auth_body_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 
 ngx_int_t ngx_http_subrequest_done(ngx_http_request_t *r, void *data, ngx_int_t rc);
-static ngx_int_t ngx_http_hello_body_init(ngx_conf_t *cf);
-
-static ngx_int_t ngx_http_hello_body_handler(ngx_http_request_t *r);
+static ngx_int_t ngx_http_auth_body_init(ngx_conf_t *cf);
 
 typedef struct
 {
@@ -20,31 +18,30 @@ typedef struct
 
 typedef struct
 {
-    ngx_int_t status;
+    ngx_flag_t enable;
     ngx_str_t uri;
-} ngx_http_hello_body_loc_conf_t;
+} ngx_http_auth_body_loc_conf_t;
 
 static ngx_command_t ngx_hello_body_commands[] = {
 
-    {ngx_string("command_status"),
+    {ngx_string("send_body"),
      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
-     ngx_conf_set_num_slot,
+     ngx_conf_set_flag_slot,
      NGX_HTTP_LOC_CONF_OFFSET,
-     offsetof(ngx_http_hello_body_loc_conf_t, status),
+     offsetof(ngx_http_auth_body_loc_conf_t, enable),
      NULL},
-
     {ngx_string("cauth"),
      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
      ngx_conf_set_str_slot,
      NGX_HTTP_LOC_CONF_OFFSET,
-     offsetof(ngx_http_hello_body_loc_conf_t, uri),
+     offsetof(ngx_http_auth_body_loc_conf_t, uri),
      NULL},
     ngx_null_command};
 
 /* The module context. */
 static ngx_http_module_t ngx_http_hello_body_module_ctx = {
-    NULL,                     /* preconfiguration */
-    ngx_http_hello_body_init, /* postconfiguration */
+    NULL,                    /* preconfiguration */
+    ngx_http_auth_body_init, /* postconfiguration */
 
     NULL, /* create main configuration */
     NULL, /* init main configuration */
@@ -52,8 +49,8 @@ static ngx_http_module_t ngx_http_hello_body_module_ctx = {
     NULL, /* create server configuration */
     NULL, /* merge server configuration */
 
-    ngx_http_hello_body_create_loc_conf, /* create location configuration */
-    ngx_http_hello_body_merge_loc_conf   /* merge location configuration */
+    ngx_http_auth_body_create_loc_conf, /* create location configuration */
+    ngx_http_auth_body_merge_loc_conf   /* merge location configuration */
 };
 
 /* Module definition. */
@@ -71,61 +68,56 @@ ngx_module_t ngx_http_hello_body_module = {
     NULL,                            /* exit master */
     NGX_MODULE_V1_PADDING};
 
-static void *ngx_http_hello_body_create_loc_conf(ngx_conf_t *cf)
+static void *ngx_http_auth_body_create_loc_conf(ngx_conf_t *cf)
 {
-    ngx_http_hello_body_loc_conf_t *conf;
+    ngx_http_auth_body_loc_conf_t *conf;
 
-    conf = ngx_pcalloc(cf->pool, sizeof(ngx_http_hello_body_loc_conf_t));
+    conf = ngx_pcalloc(cf->pool, sizeof(ngx_http_auth_body_loc_conf_t));
     if (conf == NULL)
     {
         return NULL;
     }
 
-    conf->status = NGX_CONF_UNSET;
+    conf->enable = NGX_CONF_UNSET;
 
     return conf;
 }
 
 static char *
-ngx_http_hello_body_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
+ngx_http_auth_body_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 {
-    ngx_http_hello_body_loc_conf_t *prev = parent;
-    ngx_http_hello_body_loc_conf_t *conf = child;
+    ngx_http_auth_body_loc_conf_t *prev = parent;
+    ngx_http_auth_body_loc_conf_t *conf = child;
 
     ngx_conf_merge_str_value(conf->uri, prev->uri, "");
-    ngx_conf_merge_value(conf->status, prev->status, NGX_HTTP_OK);
+    ngx_conf_merge_value(conf->enable, prev->enable, 0);
 
     return NGX_CONF_OK;
 }
 
 static ngx_int_t
-ngx_http_body_request_done(ngx_http_request_t *r, void *data, ngx_int_t rc)
+ngx_http_auth_body_request_done(ngx_http_request_t *r, void *data, ngx_int_t rc)
 {
 
     ngx_http_body_request_ctx_t *ctx = data;
 
     ctx->done = 1;
     ctx->status = r->headers_out.status;
-    ctx->subrequest = r;
 
     return rc;
 }
 
-static ngx_int_t ngx_http_hello_body_handler(ngx_http_request_t *r)
-{
-    return NGX_OK;
-}
-static ngx_int_t ngx_http_hello_body_handler2(ngx_http_request_t *r)
+static ngx_int_t ngx_http_auth_body_handler(ngx_http_request_t *r)
 {
 
     ngx_http_request_t *sr;
     ngx_http_post_subrequest_t *ps;
-    ngx_http_hello_body_loc_conf_t *plcf;
+    ngx_http_auth_body_loc_conf_t *plcf;
     ngx_http_body_request_ctx_t *ctx;
-
+    ngx_list_t *hs;
     ngx_buf_t *b;
-    ngx_chain_t out;
-    ngx_str_t msg;
+    ngx_chain_t out, *in;
+
     plcf = ngx_http_get_module_loc_conf(r, ngx_http_hello_body_module);
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_hello_body_module);
@@ -136,30 +128,39 @@ static ngx_int_t ngx_http_hello_body_handler2(ngx_http_request_t *r)
         {
             return NGX_AGAIN;
         }
-        if (ctx->status > NGX_HTTP_SPECIAL_RESPONSE)
+        if (ctx->status == NGX_HTTP_UNAUTHORIZED || ctx->status == NGX_HTTP_FORBIDDEN)
         {
-
-            b = ngx_calloc_buf(ctx->subrequest->pool);
-            if (b == NULL)
+            if (plcf->enable)
             {
-                return NGX_ERROR;
+
+                sr = ctx->subrequest;
+                r->headers_out.content_type = sr->headers_out.content_type;
+
+                hs = &sr->headers_out.headers;
+                r->headers_out.headers = *hs;
+
+                b = ngx_calloc_buf(r->pool);
+                if (b == NULL)
+                {
+                    return NGX_ERROR;
+                }
+
+                r->headers_out.status = ctx->status;
+                b->last_buf = 1;
+                b->last_in_chain = 1;
+                b->memory = 1;
+                out.buf = b;
+                out.next = NULL;
+
+                in = ctx->subrequest->out;
+                in->next = &out;
+
+                ngx_http_send_header(r);
+                return ngx_http_output_filter(r, in);
             }
-            r->headers_out.status = ctx->status;
-            b->last_buf = (r == r->main) ? 1 : 0;
-            b->last_in_chain = 1;
-
-            b->memory = 1;
-            ngx_str_set(&msg, " ");
-            b->pos = msg.data;
-            b->last = b->pos + msg.len;
-
-            out.buf = b;
-            out.next = NULL;
-
-
-            ngx_http_send_header(r);
-            return ngx_http_output_filter(r, &out);
+            return ctx->status;
         }
+
         return NGX_OK;
     }
 
@@ -176,21 +177,21 @@ static ngx_int_t ngx_http_hello_body_handler2(ngx_http_request_t *r)
     }
 
     ps->data = ctx;
-    ps->handler = ngx_http_body_request_done;
+    ps->handler = ngx_http_auth_body_request_done;
 
-    if (ngx_http_subrequest(r, &plcf->uri, &r->args, &sr, ps, NGX_HTTP_SUBREQUEST_WAITED) != NGX_OK)
+    if (ngx_http_subrequest(r, &plcf->uri, &r->args, &sr, ps, NGX_HTTP_SUBREQUEST_IN_MEMORY) != NGX_OK)
     {
         return NGX_ERROR;
     }
 
-    // sr->header_only = 1;
     ctx->subrequest = sr;
-    ngx_http_send_header(r);
+    // sr->header_only = 1;
+
     ngx_http_set_ctx(r, ctx, ngx_http_hello_body_module);
     return NGX_AGAIN;
 }
 
-static ngx_int_t ngx_http_hello_body_init(ngx_conf_t *cf)
+static ngx_int_t ngx_http_auth_body_init(ngx_conf_t *cf)
 {
     ngx_http_handler_pt *h;
 
@@ -202,14 +203,7 @@ static ngx_int_t ngx_http_hello_body_init(ngx_conf_t *cf)
     {
         return NGX_ERROR;
     }
-    *h = ngx_http_hello_body_handler;
-
-    h = ngx_array_push(&cmcf->phases[NGX_HTTP_ACCESS_PHASE].handlers);
-    if (h == NULL)
-    {
-        return NGX_ERROR;
-    }
-    *h = ngx_http_hello_body_handler2;
+    *h = ngx_http_auth_body_handler;
 
     return NGX_OK;
 }
