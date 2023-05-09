@@ -4,7 +4,13 @@ The nginx auth request module is a helpful module when you want to authenticate 
 
 ```
      location = /auth {
+          internal;
+          proxy_pass http://auth-service.local;
+     }
 
+     location /protected {
+          auth_request /auth;
      }
 
 ```
+
