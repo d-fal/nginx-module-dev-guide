@@ -18,3 +18,6 @@ ngx_module_type=HTTP
 ngx_module_srcs="$ngx_addon_dir/ngx_http_echo_module.c"
 
 # $ngx_addon_dir would be defined for each module, it will be defined later
+
+# process options in config file
+. auto/module
