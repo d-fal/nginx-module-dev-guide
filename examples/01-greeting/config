@@ -1,0 +1,22 @@
+
+# module name
+# you will use this name in the code, so be considerate about naming your module.
+ngx_module_name=ngx_http_greetings_module
+
+# ngx_addon_name
+# Name of the module as it appears in output on the console from the configure script.
+# You can name it differently, however we name it exactly the module name
+ngx_addon_name=ngx_http_greetings_module
+
+# type of module to build
+# possible values: 
+# CORE, HTTP, HTTP_FILTER, HTTP_INIT_FILTER, HTTP_AUX_FILTER, MAIL, STREAM, or MISC.
+ngx_module_type=HTTP
+
+
+# the file path that you have stuffed your code in
+ngx_module_srcs="$ngx_addon_dir/ngx_http_greetings_module.c"
+
+# $ngx_addon_dir would be defined for each module, it will be defined later
+
+. auto/module
