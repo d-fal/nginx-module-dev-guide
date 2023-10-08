@@ -10,7 +10,7 @@ Module development with Nginx is not a easy task. There are couple of problems c
 ### Run in Docker container
 This is the clean way to play around with nginx. In this tutorial, we use a docker container and develop our nginx modules in the container.
 
-> Disclaimer: We try to use the latest Nginx versions but the audience don't have to stick to the latest releases.
+> Note: We try to use the latest Nginx versions but the audience don't have to stick to the latest releases.
 
 * Step 1: build the docker image
 in this step we are going to use an ubuntu image and install necessary packages on it. Later, we will compile the nginx from source and install it. Installing from source might not be likeable by many users, but we recommend doing so because many of pre-built packages are being shipped without logging and debuging options. Moreover, you might need to contribute to the source code or default modules in the Nginx source code. 
