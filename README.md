@@ -130,3 +130,33 @@ This struct bridges Nginx and your dynamic module. Each module stores it private
 > Because threads are used in nginx only as a supplementary I/O facility with its own API, init_thread and ```exit_thread``` handlers are not currently called. There is also no ```init_master``` handler, because it would be unnecessary overhead.
 
 
+The next important struct is ```ngx_http_module_t``` which defines the module context.
+
+```c
+static ngx_http_module_t ngx_http_sample_module_ctx = {
+    NULL, /* preconfiguration */
+    NULL, /* postconfiguration */
+
+    NULL, /* create main configuration */
+    NULL, /* init main configuration */
+
+    NULL, /* create server configuration */
+    NULL, /* merge server configuration */
+
+    NULL, /* create location configuration */
+    NULL  /* merge location configuration */
+};
+```
+
+In the above struct you can see three types of configurations:
+* main configuration
+    * it applies to the whole http block
+* server configuration
+    * applies to the server block
+* location configuration
+    * applies to a single location block
+
+Moreover, preconfigurations and postconfiguration would be executed before and after main, server and location configurations applied.
+
+
+
