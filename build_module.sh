@@ -7,11 +7,8 @@ MODULE_DIR=$1
 
 if [ -z "$1" ]
 then
-    MODULE_DIR="nginx-hello-world-module"
-    if [ ! -d "$MODULE_DIR" ]
-    then
-        git clone https://github.com/perusio/nginx-hello-world-module.git
-    fi
+    echo "building module failed: no modules provided!"
+    exit 1
 fi
 
 MODULE_NAME=$(grep 'ngx_addon_name' "$MODULE_DIR/config" | sed -n 's/ngx_addon_name=\(.*\)/\1/p')
