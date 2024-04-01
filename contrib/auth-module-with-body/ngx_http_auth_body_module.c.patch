@@ -1,0 +1,122 @@
+--- nginx-auth-module/ngx_http_auth_request_module.original.c	2024-04-01 02:57:38.737026335 +0200
++++ nginx-auth-module/ngx_http_auth_request_module.c	2024-04-01 00:53:00.829990088 +0200
+@@ -13,6 +13,7 @@
+ typedef struct {
+     ngx_str_t                 uri;
+     ngx_array_t              *vars;
++    ngx_flag_t                mask_auth_response_body;
+ } ngx_http_auth_request_conf_t;
+ 
+ 
+@@ -63,6 +64,13 @@
+       0,
+       NULL },
+ 
++    { ngx_string("auth_request_mask_body"),
++      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
++      ngx_conf_set_flag_slot,
++      NGX_HTTP_LOC_CONF_OFFSET,
++      offsetof(ngx_http_auth_request_conf_t, mask_auth_response_body),
++      NULL },
++
+       ngx_null_command
+ };
+ 
+@@ -106,6 +114,8 @@
+     ngx_http_post_subrequest_t    *ps;
+     ngx_http_auth_request_ctx_t   *ctx;
+     ngx_http_auth_request_conf_t  *arcf;
++    ngx_buf_t *b;
++    ngx_chain_t out, *in;
+ 
+     arcf = ngx_http_get_module_loc_conf(r, ngx_http_auth_request_module);
+ 
+@@ -140,7 +150,36 @@
+ 
+         if (ctx->status == NGX_HTTP_UNAUTHORIZED) {
+             sr = ctx->subrequest;
++            /*
++             * send external auth service response body to the client
++             */
++            if (!arcf->mask_auth_response_body) {
++
++                r->headers_out.content_type = sr->headers_out.content_type;
+ 
++                b = ngx_calloc_buf(r->pool);
++                if (b == NULL) {
++                   return NGX_ERROR;
++                }
++
++                r->headers_out.status = ctx->status;
++
++                b->last_buf = 1;
++                b->last_in_chain = 1;
++                b->memory = 1;
++
++                out.buf = b;
++                out.next = NULL;
++ 
++                in = sr->out;
++                in->next = &out;
++
++                ngx_http_send_header(r);
++                return ngx_http_output_filter(r, in);
++            }
++
++            return ctx->status;
++        }
+             h = sr->headers_out.www_authenticate;
+ 
+             if (!h && sr->upstream) {
+@@ -164,8 +203,7 @@
+                 h = h->next;
+             }
+ 
+-            return ctx->status;
+-        }
++
+ 
+         if (ctx->status >= NGX_HTTP_OK
+             && ctx->status < NGX_HTTP_SPECIAL_RESPONSE)
+@@ -192,9 +230,10 @@
+     ps->handler = ngx_http_auth_request_done;
+     ps->data = ctx;
+ 
++
+     if (ngx_http_subrequest(r, &arcf->uri, NULL, &sr, ps,
+-                            NGX_HTTP_SUBREQUEST_WAITED)
+-        != NGX_OK)
++                            arcf->mask_auth_response_body ? NGX_HTTP_SUBREQUEST_WAITED: 
++                            NGX_HTTP_SUBREQUEST_IN_MEMORY) != NGX_OK)
+     {
+         return NGX_ERROR;
+     }
+@@ -209,8 +248,10 @@
+         return NGX_ERROR;
+     }
+ 
+-    sr->header_only = 1;
+-
++    if (arcf->mask_auth_response_body)
++    {
++        sr->header_only = 1;
++    }
+     ctx->subrequest = sr;
+ 
+     ngx_http_set_ctx(r, ctx, ngx_http_auth_request_module);
+@@ -322,6 +363,7 @@
+      */
+ 
+     conf->vars = NGX_CONF_UNSET_PTR;
++    conf->mask_auth_response_body = NGX_CONF_UNSET;
+ 
+     return conf;
+ }
+@@ -335,6 +377,7 @@
+ 
+     ngx_conf_merge_str_value(conf->uri, prev->uri, "");
+     ngx_conf_merge_ptr_value(conf->vars, prev->vars, NULL);
++    ngx_conf_merge_value(conf->mask_auth_response_body, prev->mask_auth_response_body,1);
+ 
+     return NGX_CONF_OK;
+ }
