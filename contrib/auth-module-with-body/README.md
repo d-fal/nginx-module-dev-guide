@@ -22,12 +22,11 @@ This module strives to enable Nginx auth module to expose origin error responses
      location = /auth {
           internal;
           proxy_pass http://auth-service.local;
-          auth_request_mask_body off; # default on
      }
 
      location /protected {
           auth_request /auth;
-          auth_request_mask_body off;
+          auth_request_mask_body off; # default on
           # ...
      }
 
