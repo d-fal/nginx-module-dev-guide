@@ -287,7 +287,7 @@ Now, let's start nginx with the nginx.conf file within the module.
 
 
 ```bash
-    $ nginx -c /code/example/01-greetings/nginx.conf
+    $ nginx -c /code/examples/01-greetings/nginx.conf
 ```
 
 Now you can use curl and start calling your module.

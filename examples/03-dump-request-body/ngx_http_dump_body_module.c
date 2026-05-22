@@ -3,37 +3,30 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-static ngx_int_t ngx_http_echo_handler(ngx_http_request_t *r);
-static char *ngx_http_echo(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
-static void *ngx_http_echo_create_loc_conf(ngx_conf_t *cf);
+static ngx_int_t ngx_http_dump_body_handler(ngx_http_request_t *r);
+static char *ngx_http_dump_body(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static void *ngx_http_dump_body_create_loc_conf(ngx_conf_t *cf);
 static char *
-ngx_http_echo_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
+ngx_http_dump_body_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 void
 ngx_http_foo_init(ngx_http_request_t *r);
 
 typedef struct
 {
-    ngx_flag_t enable;
-} ngx_echo_conf_t;
+} ngx_dump_body_conf_t;
 
-static ngx_command_t ngx_http_echo_commands[] = {
+static ngx_command_t ngx_http_dump_body_commands[] = {
 
-    {ngx_string("echo_module"),           /* how we activate this module in config file */
+    {ngx_string("dump_body"),           /* how we activate this module in config file */
      NGX_HTTP_LOC_CONF | NGX_CONF_NOARGS, /* echo_module accepts on/off values */
-     ngx_http_echo,                       /* module configuration function */
+     ngx_http_dump_body,                       /* module configuration function */
      0,
      0,
-     NULL},
-    {ngx_string("echo_enabled"),        /* how we activate this module in config file */
-     NGX_HTTP_LOC_CONF | NGX_CONF_FLAG, /* echo_module accepts on/off values */
-     ngx_conf_set_flag_slot,            /* module configuration function */
-     NGX_HTTP_LOC_CONF_OFFSET,
-     offsetof(ngx_echo_conf_t, enable),
      NULL},
     ngx_null_command /* end of commands */
 };
 
-static ngx_http_module_t ngx_http_echo_module_ctx = {
+static ngx_http_module_t ngx_http_dump_body_module_ctx = {
     NULL, /* preconfiguration */
     NULL, /* postconfiguration */
 
@@ -43,8 +36,8 @@ static ngx_http_module_t ngx_http_echo_module_ctx = {
     NULL, /* create server configuration */
     NULL, /* merge server configuration */
 
-    ngx_http_echo_create_loc_conf, /* create location configuration */
-    ngx_http_echo_merge_loc_conf   /* merge location configuration */
+    ngx_http_dump_body_create_loc_conf, /* create location configuration */
+    ngx_http_dump_body_merge_loc_conf   /* merge location configuration */
 };
 
 /*
@@ -52,12 +45,12 @@ static ngx_http_module_t ngx_http_echo_module_ctx = {
     to the config file.
     Note that the name of this module should be the one you picked
     for $ngx_module_name.
-    For this module, it is: $ngx_module_name=ngx_http_echo_module
+    For this module, it is: $ngx_module_name=ngx_http_dump_body_module
 */
-ngx_module_t ngx_http_echo_module = {
+ngx_module_t ngx_http_dump_body_module = {
     NGX_MODULE_V1,
-    &ngx_http_echo_module_ctx, /* module context */
-    ngx_http_echo_commands,    /*module directives*/
+    &ngx_http_dump_body_module_ctx, /* module context */
+    ngx_http_dump_body_commands,    /*module directives*/
     NGX_HTTP_MODULE,           /* module type */
     NULL,                      /* init master */
     NULL,                      /* init module */
@@ -68,44 +61,20 @@ ngx_module_t ngx_http_echo_module = {
     NULL,                      /* exit master */
     NGX_MODULE_V1_PADDING};
 
-static ngx_int_t ngx_http_echo_handler(ngx_http_request_t *r)
+static ngx_int_t ngx_http_dump_body_handler(ngx_http_request_t *r)
 {
     ngx_buf_t *b;
     ngx_chain_t out;
     ngx_str_t msg = ngx_string("echo_module not enabled!");
-    ngx_echo_conf_t *slcf = ngx_http_get_module_loc_conf(r, ngx_http_echo_module);
-    ngx_list_part_t *part = &r->headers_in.headers.part;
-    ngx_table_elt_t *header = part->elts;
+    // ngx_dump_body_conf_t *slcf = ngx_http_get_module_loc_conf(r, ngx_http_dump_body_module);
+    // ngx_list_part_t *part = &r->headers_in.headers.part;
     ngx_int_t rc;
 
-    if (slcf->enable)
-    {
-        /* read request body */
-        rc = ngx_http_read_client_request_body(r, ngx_http_foo_init);
-        if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
-        /* error */
-            return rc;
-        }
-
-        for (size_t i = 0; ; i++)
-        {
-            if (i >= part->nelts)
-            {
-                if (part->next == NULL)
-                {
-                    break;
-                }
-                part = part->next;
-                header = part->elts;
-                i = 0;
-            }
-
-            ngx_log_debug2(NGX_LOG_DEBUG_HTTP,
-                           r->connection->log, 0,
-                           "http echo handler! %V : %V",
-                           &header[i].key, &header[i].value);
-        }
-        ngx_str_set(&msg, "header-dump written in logs!");
+    /* read request body */
+    rc = ngx_http_read_client_request_body(r, ngx_http_foo_init);
+    if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
+    /* error */
+        return rc;
     }
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http echo handler!");
@@ -152,28 +121,26 @@ void ngx_http_foo_init(ngx_http_request_t *r)
     for (in = r->request_body->bufs; in; in = in->next) {
          body.data = in->buf->pos;
          body.len = in->buf->last - in->buf->pos;
-         u_char *str = body.data;
-         for(size_t x=0; x<body.len;x++) {
-         ngx_log_debug1(NGX_LOG_DEBUG_HTTP,
+         len += ngx_buf_size(in->buf);
+         ngx_log_debug2(NGX_LOG_DEBUG_HTTP,
                            r->connection->log, 0,
-                           "http echo handler! CHARACTER::  %c",
-                           *(str+x));
-         }
-        len += ngx_buf_size(in->buf);
+                           "http echo handler! LEN: %O <>  %V",
+                           len,&body);
     }
-
-    b = ngx_create_temp_buf(r->pool, NGX_OFF_T_LEN);
+    len++;
+    b = ngx_create_temp_buf(r->pool, body.len);
     if (b == NULL) {
         ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
         return;
     }
+    
 
-    b->last = ngx_sprintf(b->pos, "%O", len);
+    b->last = ngx_sprintf(b->pos, "%V\n",&body);
     b->last_buf = (r == r->main) ? 1 : 0;
     b->last_in_chain = 1;
 
     r->headers_out.status = NGX_HTTP_OK;
-    r->headers_out.content_length_n = b->last - b->pos;
+    r->headers_out.content_length_n = len;
 
     rc = ngx_http_send_header(r);
 
@@ -190,43 +157,33 @@ void ngx_http_foo_init(ngx_http_request_t *r)
     ngx_http_finalize_request(r, rc);
 }
 
-static char *ngx_http_echo(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+static char *ngx_http_dump_body(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_core_loc_conf_t *clcf = conf; /* pointer to core location configuration */
 
     clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
-    clcf->handler = ngx_http_echo_handler;
+    clcf->handler = ngx_http_dump_body_handler;
 
     return NGX_CONF_OK;
 }
 
-static void *ngx_http_echo_create_loc_conf(ngx_conf_t *cf)
+static void *ngx_http_dump_body_create_loc_conf(ngx_conf_t *cf)
 {
-    ngx_echo_conf_t *conf;
+    ngx_dump_body_conf_t *conf;
 
-    conf = ngx_pcalloc(cf->pool, sizeof(ngx_echo_conf_t));
+    conf = ngx_pcalloc(cf->pool, sizeof(ngx_dump_body_conf_t));
     if (conf == NULL)
     {
         return NULL;
     }
-    // conf->enable =1;
-    /*
-     * set by ngx_pcalloc():
-     *
-     *     conf->text = { 0, NULL };
-     */
-    conf->enable = NGX_CONF_UNSET;
     return conf;
 }
 
 static char *
-ngx_http_echo_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
+ngx_http_dump_body_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 {
-    ngx_echo_conf_t *prev = parent;
-    ngx_echo_conf_t *conf = child;
-
-    // ngx_conf_merge_ptr_value(conf->text, prev->text, NULL);
-    ngx_conf_merge_value(conf->enable, prev->enable, NGX_HTTP_OK);
-
+    // ngx_dump_body_conf_t *prev = parent;
+    // ngx_dump_body_conf_t *conf = child;
+   
     return NGX_CONF_OK;
 }

@@ -57,7 +57,7 @@ static ngx_int_t ngx_http_greetings_handler(ngx_http_request_t *r)
 {
     ngx_buf_t *b;
     ngx_chain_t out;
-    ngx_str_t msg = ngx_string("greetings!");
+    ngx_str_t msg = ngx_string("greetings!\n");
  
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http echo handler!");
