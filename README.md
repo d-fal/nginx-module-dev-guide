@@ -114,6 +114,8 @@ ngx_module_t ngx_http_greetings_module= {
     NGX_MODULE_V1_PADDING};
 ```
 
+> Important note: the name of the module marked by `ngx_module_t MODULE_NAME` should be exactly define in the [module's config](#config-file) file.
+
 This struct bridges Nginx and your dynamic module. Each module stores it private data in ctx field. Module configurations are defined in command array. Your dynamic module can be [invoked in some stages](http://nginx.org/en/docs/dev/development_guide.html#core_modules) in nginx lifecycle. The module lifecycle consists of the following events:
 
 
