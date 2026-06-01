@@ -1,4 +1,4 @@
-# ngx_modbus_gateway_module
+# ngx_stream_modbus_proxy_module
 
 A dynamic **nginx stream module** that turns nginx into a **Modbus TCP gateway**:
 it inspects the *unit / slave identifier* in each incoming Modbus TCP request and
@@ -43,7 +43,7 @@ that unit id:
 
 ```
                          ┌─────────────────────────────┐
- client ──TCP:502──▶     │  nginx + ngx_modbus_gateway │
+ client ──TCP:502──▶     │  nginx + modbus stream proxy│
  (unit id = 2)           │  peek unit id → pick backend│
                          └──────────────┬──────────────┘
                                         │ unit 2 → 10.20.20.2:502
@@ -80,7 +80,7 @@ unchanged — the module never consumes or rewrites payload.
 
 - nginx built **with the stream module** (`--with-stream`) and **compat ABI**
   (`--with-compat`) so the dynamic module can be loaded.
-- The module is type `STREAM`; its addon name is `ngx_modbus_gateway_module`
+- The module is type `STREAM`; its addon name is `ngx_stream_modbus_proxy_module`
   (see the `config` file).
 
 Using the helper script in this repo (builds against the running nginx version
@@ -97,7 +97,7 @@ cd nginx-<version>
 ./configure --with-compat --with-stream \
             --add-dynamic-module=../examples/05-modbus-gateway/
 make modules
-cp objs/ngx_modbus_gateway_module.so <nginx-modules-dir>/
+cp objs/ngx_stream_modbus_proxy_module.so <nginx-modules-dir>/
 ```
 
 ---
@@ -107,7 +107,7 @@ cp objs/ngx_modbus_gateway_module.so <nginx-modules-dir>/
 At the **top** of `nginx.conf` (main context):
 
 ```nginx
-load_module modules/ngx_modbus_gateway_module.so;
+load_module modules/ngx_stream_modbus_proxy_module.so;
 ```
 
 ---
@@ -193,7 +193,7 @@ nginx: [emerg] no handler for server in .../nginx.conf:NN
 ## Complete example
 
 ```nginx
-load_module modules/ngx_modbus_gateway_module.so;
+load_module modules/ngx_stream_modbus_proxy_module.so;
 
 events {
     worker_connections 1024;
@@ -241,7 +241,7 @@ For each connection, given the unit id `N` from the request header:
    connection (`502`-class close):
 
    ```
-   modbus_gateway: no backend for slave_id=N
+   modbus_proxy: no backend for slave_id=N
    ```
 
 ---
@@ -320,8 +320,8 @@ nc -l 127.0.0.1 5020      # GNU netcat: add -k to keep listening
 **Runtime** messages (backend selection, timeout) go to the `error_log` file:
 
 ```
-modbus_gateway: slave_id=2 -> 10.20.20.2:502
-modbus_gateway: session timeout reached, closing connection
+modbus_proxy: slave_id=2 -> 10.20.20.2:502
+modbus_proxy: session timeout reached, closing connection
 ```
 
 **Config‑parse‑time** messages do **not** go to the `error_log` file — at parse
