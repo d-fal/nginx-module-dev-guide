@@ -5,8 +5,6 @@
 
 
 static char *ngx_stream_modbus_proxy_location(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
-static char *ngx_stream_modbus_proxy_host(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
-static char *ngx_stream_modbus_proxy_timeout(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static ngx_int_t ngx_stream_modbus_proxy_preread(ngx_stream_session_t *s);
 static void ngx_stream_modbus_proxy_timeout_handler(ngx_event_t *ev);
 static void ngx_stream_modbus_proxy_cleanup_timer(void *data);
@@ -25,6 +23,7 @@ typedef struct
     ngx_uint_t slave_id;
     ngx_str_t proxy_pass;
     ngx_msec_t timeout;   // absolute max session duration, 0 = unlimited
+    ngx_str_t mode; // modbus mode is either tcp or rtu
 } ngx_stream_modbus_proxy_loc_conf_t;
 
 // server conf
@@ -51,18 +50,22 @@ static ngx_command_t ngx_stream_modbus_proxy_commands[] = {
 
     {ngx_string("host"),
      NGX_STREAM_SRV_CONF | NGX_CONF_TAKE1,
-     ngx_stream_modbus_proxy_host,
-     0,
-     0,
+     ngx_conf_set_str_slot,
+     NGX_STREAM_SRV_CONF_OFFSET,
+          offsetof(ngx_stream_modbus_proxy_loc_conf_t, proxy_pass),
      NULL},
-
     {ngx_string("timeout"),
      NGX_STREAM_SRV_CONF | NGX_CONF_TAKE1,
-     ngx_stream_modbus_proxy_timeout,
-     0,
-     0,
+     ngx_conf_set_msec_slot,
+     NGX_STREAM_SRV_CONF_OFFSET,
+     offsetof(ngx_stream_modbus_proxy_loc_conf_t, timeout),
      NULL},
-
+     {ngx_string("mode"),
+     NGX_STREAM_SRV_CONF | NGX_CONF_TAKE1,
+     ngx_conf_set_str_slot,
+     NGX_STREAM_SRV_CONF_OFFSET,
+     offsetof(ngx_stream_modbus_proxy_loc_conf_t, mode),
+     NULL},
     ngx_null_command};
 
 static ngx_stream_module_t ngx_stream_modbus_proxy_module_ctx = {
@@ -91,46 +94,6 @@ ngx_module_t ngx_stream_modbus_proxy_module = {
 
 static ngx_stream_modbus_proxy_loc_conf_t *ngx_stream_modbus_proxy_find_location(ngx_stream_modbus_proxy_srv_conf_t *mgcf, ngx_uint_t slave_id);
 
-
-static char *ngx_stream_modbus_proxy_host(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
-{
-    // Inside a modbus { } block cf->ctx is swapped to our own ctx (see
-    // ngx_stream_modbus_proxy_location), so read the location directly from there
-    // rather than from the `conf` argument the config engine computes.
-    ngx_stream_modbus_proxy_ctx_t *ctx = cf->ctx;
-    ngx_stream_modbus_proxy_loc_conf_t *mlcf = ctx->loc_conf;
-    ngx_str_t *value = cf->args->elts;
-
-    mlcf->proxy_pass = value[1];
-    ngx_conf_log_error(NGX_LOG_INFO, cf, 0,
-                       "parse config: modbus location slave_id=%ui: host %V",
-                       mlcf->slave_id, &mlcf->proxy_pass);
-
-    return NGX_CONF_OK;
-}
-
-
-// "timeout <time>;" inside a modbus { } block: absolute max session duration.
-static char *ngx_stream_modbus_proxy_timeout(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
-{
-    ngx_stream_modbus_proxy_ctx_t *ctx = cf->ctx;
-    ngx_stream_modbus_proxy_loc_conf_t *mlcf = ctx->loc_conf;
-    ngx_str_t *value = cf->args->elts;
-    ngx_int_t t;
-
-    t = ngx_parse_time(&value[1], 0);   // 0 -> result in milliseconds
-    if (t == NGX_ERROR) {
-        return "has an invalid timeout value";
-    }
-
-    mlcf->timeout = (ngx_msec_t) t;
-
-    ngx_log_debug2(NGX_LOG_WARN, cf->log, 0,
-                       "gateway timeout: modbus slave_id=%ui: timeout %M ms",
-                       mlcf->slave_id, mlcf->timeout);
-
-    return NGX_CONF_OK;
-}
 
 
 // Fires when a session outlives its backend's configured timeout: close it.
@@ -176,7 +139,7 @@ static char *ngx_stream_modbus_proxy_location(ngx_conf_t *cf, ngx_command_t *cmd
     ngx_stream_modbus_proxy_srv_conf_t *mgcf = conf;
     ngx_str_t *value = cf->args->elts;
     ngx_stream_modbus_proxy_loc_conf_t *loc_conf;
-    ngx_stream_modbus_proxy_ctx_t *ctx;
+    ngx_stream_conf_ctx_t *ctx, *outer;
     char *rv;
 
     // Create new location configuration
@@ -188,6 +151,7 @@ static char *ngx_stream_modbus_proxy_location(ngx_conf_t *cf, ngx_command_t *cmd
 
     loc_conf->proxy_pass.len = 0;
     loc_conf->proxy_pass.data = NULL;
+    loc_conf->timeout = NGX_CONF_UNSET_MSEC;
 
     // Parse slave_id
     if (ngx_strcmp(value[1].data, "default") == 0)
@@ -214,20 +178,33 @@ static char *ngx_stream_modbus_proxy_location(ngx_conf_t *cf, ngx_command_t *cmd
         }
     }
 
-    // Set up context for parsing inside block
-    ctx = ngx_pcalloc(cf->pool, sizeof(ngx_stream_modbus_proxy_ctx_t));
+    // Build a stream conf context for the block so that sub-directives resolve
+    // their `conf` to THIS block's loc_conf. We copy the surrounding srv_conf
+    // array and repoint our module's slot at loc_conf; the config engine then
+    // computes conf = srv_conf[ctx_index] = loc_conf, which is what generic slot
+    // setters such as ngx_conf_set_str_slot (used by `mode`) write into.
+    outer = cf->ctx;
+
+    ctx = ngx_pcalloc(cf->pool, sizeof(ngx_stream_conf_ctx_t));
     if (ctx == NULL)
     {
         return NGX_CONF_ERROR;
     }
 
-    ctx->loc_conf = loc_conf;
+    ctx->main_conf = outer->main_conf;
+    ctx->srv_conf = ngx_pcalloc(cf->pool, sizeof(void *) * ngx_stream_max_module);
+    if (ctx->srv_conf == NULL)
+    {
+        return NGX_CONF_ERROR;
+    }
+    ngx_memcpy(ctx->srv_conf, outer->srv_conf, sizeof(void *) * ngx_stream_max_module);
+    ctx->srv_conf[ngx_stream_modbus_proxy_module.ctx_index] = loc_conf;
 
     // Save current context and set new one
     void *save = cf->ctx;
     cf->ctx = ctx;
 
-    // Parse the block (the `host` directive fills in loc_conf->proxy_pass)
+    // Parse the block (host/timeout/mode fill in loc_conf via their `conf` arg)
     rv = ngx_conf_parse(cf, NULL);
 
     // Restore context
@@ -236,6 +213,16 @@ static char *ngx_stream_modbus_proxy_location(ngx_conf_t *cf, ngx_command_t *cmd
     if (rv != NGX_CONF_OK)
     {
         return rv;
+    }
+
+    if (loc_conf->mode.data == NULL)
+    {
+        ngx_str_set(&loc_conf->mode, "tcp");
+    }
+
+    if (loc_conf->timeout == NGX_CONF_UNSET_MSEC)
+    {
+        loc_conf->timeout = 0;
     }
 
     // Store in array for later lookup, now that the block has been parsed and
@@ -247,9 +234,6 @@ static char *ngx_stream_modbus_proxy_location(ngx_conf_t *cf, ngx_command_t *cmd
     }
     *new_loc = *loc_conf;
 
-    // If this is the default location, remember it. Point at the standalone
-    // loc_conf (stable on cf->pool) rather than the array element, since later
-    // ngx_array_push calls may reallocate the array.
     if (loc_conf->slave_id == 0)
     {
         mgcf->default_location = loc_conf;
@@ -333,8 +317,11 @@ static ngx_int_t ngx_stream_modbus_proxy_preread(ngx_stream_session_t *s)
     ngx_stream_set_ctx(s, ctx, ngx_stream_modbus_proxy_module);
 
     ngx_log_debug2(NGX_LOG_DEBUG_STREAM, c->log, 0,
-                  "modbus_proxy: slave_id=%ui -> %V",
+                  "##### modbus_proxy: slave_id=%ui -> %V",
                   slave_id, &loc->proxy_pass);
+    ngx_log_debug1(NGX_LOG_DEBUG_STREAM, c->log, 0,
+                  "#### modbus_proxy: mode=%V",
+                  &loc->mode);
 
     // Arm the absolute session-duration timer for this backend, if configured.
     if (loc->timeout) {
