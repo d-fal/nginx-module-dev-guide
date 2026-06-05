@@ -1,0 +1,49 @@
+
+# module name
+# you will use this name in the code, so be considerate about naming your module.
+ngx_module_name=ngx_stream_modbus_proxy_module
+
+# ngx_addon_name
+# Name of the module as it appears in output on the console from the configure script.
+# You can name it differently, however we name it exactly the module name
+ngx_addon_name=ngx_stream_modbus_proxy_module
+
+# type of module to build
+# possible values: 
+# CORE, HTTP, HTTP_FILTER, HTTP_INIT_FILTER, HTTP_AUX_FILTER, MAIL, STREAM, or MISC.
+ngx_module_type=STREAM
+
+
+# the file path that you have stuffed your code in
+ngx_module_srcs="$ngx_addon_dir/ngx_stream_modbus_proxy_module.c"
+
+# $ngx_addon_dir would be defined for each module, it will be defined later
+
+# --- Optional Modbus RTU (serial) bridge --------------------------------------
+# The "mode rtu" serial bridge depends on libmodbus. It is compiled in by
+# default; disable it (and drop the libmodbus header + linked library) by
+# configuring with MODBUS_RTU=0, e.g.:
+#
+#     MODBUS_RTU=0 ./configure --with-compat --with-stream \
+#                  --add-dynamic-module=../contrib/modbus-gateway/
+#
+# When enabled we (a) resolve the libmodbus include/lib flags and (b) define
+# NGX_STREAM_MODBUS_RTU into ngx_auto_config.h (via auto/have) so the C source
+# guards the RTU code on it. When disabled we add neither, so the .so neither
+# includes <modbus/modbus.h> nor links -lmodbus.
+if [ "${MODBUS_RTU:-1}" = "0" ]; then
+    ngx_module_incs=
+    ngx_module_libs=
+else
+    # ngx_module_incs: header search paths (no -I prefix; auto/make adds it).
+    # ngx_module_libs: libs linked into the dynamic .so itself.
+    ngx_module_incs="$(pkg-config --cflags-only-I libmodbus 2>/dev/null | sed -e 's/-I//g')"
+    ngx_module_libs="$(pkg-config --libs libmodbus 2>/dev/null || echo -lmodbus)"
+
+    # Append `#define NGX_STREAM_MODBUS_RTU 1` to objs/ngx_auto_config.h, which
+    # is included by every source file.
+    have=NGX_STREAM_MODBUS_RTU . auto/have
+fi
+
+# process options in config file
+. auto/module

@@ -3,10 +3,17 @@
 #include <ngx_core.h>
 #include <ngx_stream.h>
 
+// The Modbus RTU (serial) bridge depends on libmodbus and is compiled in only
+// when NGX_STREAM_MODBUS_RTU is defined by the addon `config` (default on;
+// disable with MODBUS_RTU=0 at configure time). Without it the module is a
+// pure Modbus TCP router with no libmodbus header or linked library.
+#if (NGX_STREAM_MODBUS_RTU)
 #include <modbus/modbus.h>
 
 // Modbus ADU/PDU limits (see modbus.h: MODBUS_MAX_ADU_LENGTH == 260).
 #define NGX_MODBUS_ADU_MAX MODBUS_MAX_ADU_LENGTH
+#endif
+
 #define NGX_MODBUS_MBAP_LEN 7
 
 // Modbus exception codes returned to the client on the rtu path:
@@ -50,6 +57,7 @@ static char *ngx_stream_modbus_proxy_merge_srv_conf(ngx_conf_t *cf, void *parent
 static ngx_int_t ngx_stream_modbus_proxy_postconfiguration(ngx_conf_t *cf);
 
 // --- Modbus RTU (serial) bridge ---------------------------------------------
+#if (NGX_STREAM_MODBUS_RTU)
 static ngx_int_t ngx_stream_modbus_rtu_takeover(ngx_stream_session_t *s,
                                                 ngx_connection_t *c, ngx_stream_modbus_proxy_loc_conf_t *loc);
 static void ngx_stream_modbus_client_read(ngx_event_t *rev);
@@ -58,6 +66,7 @@ static void ngx_stream_modbus_client_send(ngx_stream_session_t *s);
 static void ngx_stream_modbus_rtu_transaction(ngx_stream_session_t *s);
 static modbus_t *ngx_stream_modbus_rtu_open(ngx_stream_modbus_proxy_srv_conf_t *mgcf,
                                             ngx_log_t *log);
+#endif
 
 // Location conf (one per `modbus <id> { ... }` block)
 struct ngx_stream_modbus_proxy_loc_conf_s
@@ -77,7 +86,7 @@ struct ngx_stream_modbus_proxy_loc_conf_s
 // block; each block only marks its unit id as living on that bus.
 struct ngx_stream_modbus_proxy_srv_conf_s
 {
-    ngx_array_t *locations;
+    ngx_array_t *blocks;
     ngx_stream_modbus_proxy_loc_conf_t *default_location;
 
     // --- RTU serial bus parameters (set at server level) ----------------
@@ -88,10 +97,12 @@ struct ngx_stream_modbus_proxy_srv_conf_s
     ngx_uint_t stop_bits;    // 1 or 2 (default 1)
     ngx_msec_t resp_timeout; // RTU reply timeout (default 1000 ms)
 
+#if (NGX_STREAM_MODBUS_RTU)
     // --- runtime state, worker-local ------------------------------------
     // libmodbus context for the bus, opened lazily on the first rtu request and
     // kept open for the worker's lifetime (reopened after a serial error).
     modbus_t *mb;
+#endif
 };
 
 // Per-session ctx. On the tcp path only `loc_conf` is used (read by the
@@ -100,6 +111,7 @@ typedef struct
 {
     ngx_stream_modbus_proxy_loc_conf_t *loc_conf;
 
+#if (NGX_STREAM_MODBUS_RTU)
     ngx_stream_session_t *s;
     ngx_connection_t *client;
 
@@ -110,6 +122,7 @@ typedef struct
     u_char rsp[NGX_MODBUS_ADU_MAX]; // outbound MBAP reply
     size_t rsp_len;
     size_t rsp_sent;
+#endif
 } ngx_stream_modbus_proxy_ctx_t;
 
 static ngx_command_t ngx_stream_modbus_proxy_commands[] = {
@@ -207,125 +220,6 @@ ngx_module_t ngx_stream_modbus_proxy_module = {
 
 static ngx_stream_modbus_proxy_loc_conf_t *ngx_stream_modbus_proxy_find_location(ngx_stream_modbus_proxy_srv_conf_t *mgcf, ngx_uint_t slave_id);
 
-// Preread-phase handler: peek the Modbus TCP MBAP header to pick a backend.
-//
-// The MBAP header is 7 bytes; byte 6 is the unit (slave) id. We read it from
-// the preread buffer that nginx fills for us, WITHOUT consuming it, so the
-// full frame is still forwarded upstream by the proxy module. The chosen
-// backend is stashed in the per-session ctx for the $modbus_backend variable.
-static ngx_int_t ngx_stream_modbus_proxy_preread(ngx_stream_session_t *s)
-{
-    ngx_connection_t *c = s->connection;
-    ngx_stream_modbus_proxy_srv_conf_t *mgcf;
-    ngx_stream_modbus_proxy_loc_conf_t *loc;
-    ngx_stream_modbus_proxy_ctx_t *ctx;
-    ngx_uint_t slave_id;
-    ngx_uint_t op_code;
-
-    ctx = ngx_stream_get_module_ctx(s, ngx_stream_modbus_proxy_module);
-    if (ctx != NULL)
-    {
-        // Backend already chosen on an earlier preread invocation.
-        return NGX_OK;
-    }
-
-    mgcf = ngx_stream_get_module_srv_conf(s, ngx_stream_modbus_proxy_module);
-    if (mgcf == NULL)
-    {
-        return NGX_OK;
-    }
-
-    // Wait until the 7-byte MBAP header is fully buffered.
-    if (c->buffer == NULL || (size_t)(c->buffer->last - c->buffer->pos) < 8)
-    {
-        return NGX_AGAIN;
-    }
-
-    op_code = c->buffer->pos[7];
-    slave_id = c->buffer->pos[6];
-
-    loc = ngx_stream_modbus_proxy_find_location(mgcf, slave_id);
-    if (loc == NULL)
-    {
-        ngx_log_error(NGX_LOG_ERR, c->log, 0,
-                      "modbus_proxy: no backend for slave_id=%ui", slave_id);
-        return NGX_STREAM_BAD_GATEWAY;
-    }
-
-    // Reject denied function codes before forwarding (applies to both tcp and
-    // rtu modes). deny_ops is a bitmask keyed by function code; strip the high
-    // exception bit defensively. NGX_STREAM_FORBIDDEN (403) closes the session.
-    if (loc->deny_ops & NGX_MODBUS_OP(op_code & 0x7f))
-    {
-        ngx_log_error(NGX_LOG_ERR, c->log, 0,
-                      "modbus_proxy: denied op 0x%02Xi for slave_id=%ui",
-                      op_code, slave_id);
-        return NGX_STREAM_FORBIDDEN;
-    }
-
-    // "mode rtu": bridge to a serial port ourselves. We take over the client
-    // connection and return NGX_DONE so the TCP proxy content handler is never
-    // reached (see ngx_stream_core_preread_phase). The tcp path below is
-    // unchanged and still returns NGX_OK.
-    if (ngx_strcmp(loc->mode.data, "rtu") == 0)
-    {
-        return ngx_stream_modbus_rtu_takeover(s, c, loc);
-    }
-
-    // tcp mode: a backend host is required; the proxy module forwards via $proxy_pass.
-    if (loc->proxy_pass.len == 0)
-    {
-        ngx_log_error(NGX_LOG_ERR, c->log, 0,
-                      "modbus_proxy: no backend for slave_id=%ui", slave_id);
-        return NGX_STREAM_BAD_GATEWAY;
-    }
-
-    ctx = ngx_pcalloc(c->pool, sizeof(ngx_stream_modbus_proxy_ctx_t));
-    if (ctx == NULL)
-    {
-        return NGX_ERROR;
-    }
-
-    ctx->loc_conf = loc;
-    ngx_stream_set_ctx(s, ctx, ngx_stream_modbus_proxy_module);
-
-    ngx_log_debug3(NGX_LOG_DEBUG_STREAM, c->log, 0,
-                   "##### modbus_proxy: slave_id=%ui -> %V, func code: %X",
-                   slave_id, &loc->proxy_pass, op_code);
-    ngx_log_debug1(NGX_LOG_DEBUG_STREAM, c->log, 0,
-                   "#### modbus_proxy: mode=%V",
-                   &loc->mode);
-
-    // Arm the absolute session-duration timer for this backend, if configured.
-    if (loc->timeout)
-    {
-        ngx_event_t *tev;
-        ngx_pool_cleanup_t *cln;
-
-        tev = ngx_pcalloc(c->pool, sizeof(ngx_event_t));
-        if (tev == NULL)
-        {
-            return NGX_ERROR;
-        }
-
-        tev->handler = ngx_stream_modbus_proxy_timeout_handler;
-        tev->data = s;
-        tev->log = c->log;
-
-        // Ensure the timer is cancelled if the session closes on its own first.
-        cln = ngx_pool_cleanup_add(c->pool, 0);
-        if (cln == NULL)
-        {
-            return NGX_ERROR;
-        }
-        cln->handler = ngx_stream_modbus_proxy_cleanup_timer;
-        cln->data = tev;
-
-        ngx_add_timer(tev, loc->timeout);
-    }
-
-    return NGX_OK;
-}
 
 // Fires when a session outlives its backend's configured timeout: close it.
 static void ngx_stream_modbus_proxy_timeout_handler(ngx_event_t *ev)
@@ -420,6 +314,17 @@ static char *ngx_stream_modbus_proxy_block(ngx_conf_t *cf, ngx_command_t *cmd, v
                            &value[2]);
         return NGX_CONF_ERROR;
     }
+#if !(NGX_STREAM_MODBUS_RTU)
+    // The serial bridge was compiled out (built without libmodbus). Reject
+    // "mode rtu" at config time rather than failing mysteriously at runtime.
+    if (ngx_strcmp(value[2].data, "rtu") == 0)
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "modbus mode \"rtu\" is not supported: this module "
+                           "was built without libmodbus (MODBUS_RTU=0)");
+        return NGX_CONF_ERROR;
+    }
+#endif
     loc_conf->mode = value[2];
 
     // deny_ops is a bitmask: 0 means "nothing denied". ngx_conf_set_bitmask_slot
@@ -428,10 +333,10 @@ static char *ngx_stream_modbus_proxy_block(ngx_conf_t *cf, ngx_command_t *cmd, v
     // is -1 (all bits set), which would deny every function code.
     loc_conf->deny_ops = 0;
 
-    if (mgcf->locations == NULL)
+    if (mgcf->blocks == NULL)
     {
-        mgcf->locations = ngx_array_create(cf->pool, 2, sizeof(ngx_stream_modbus_proxy_loc_conf_t));
-        if (mgcf->locations == NULL)
+        mgcf->blocks = ngx_array_create(cf->pool, 2, sizeof(ngx_stream_modbus_proxy_loc_conf_t));
+        if (mgcf->blocks == NULL)
         {
             return NGX_CONF_ERROR;
         }
@@ -476,7 +381,7 @@ static char *ngx_stream_modbus_proxy_block(ngx_conf_t *cf, ngx_command_t *cmd, v
 
     // Store in array for later lookup, now that the block has been parsed and
     // proxy_pass is populated.
-    ngx_stream_modbus_proxy_loc_conf_t *new_loc = ngx_array_push(mgcf->locations);
+    ngx_stream_modbus_proxy_loc_conf_t *new_loc = ngx_array_push(mgcf->blocks);
     if (new_loc == NULL)
     {
         return NGX_CONF_ERROR;
@@ -495,21 +400,21 @@ static char *ngx_stream_modbus_proxy_block(ngx_conf_t *cf, ngx_command_t *cmd, v
 static ngx_stream_modbus_proxy_loc_conf_t *ngx_stream_modbus_proxy_find_location(ngx_stream_modbus_proxy_srv_conf_t *mgcf, ngx_uint_t slave_id)
 {
     ngx_uint_t i;
-    ngx_stream_modbus_proxy_loc_conf_t *locations;
+    ngx_stream_modbus_proxy_loc_conf_t *blocks;
 
-    if (mgcf->locations == NULL)
+    if (mgcf->blocks == NULL)
     {
         return mgcf->default_location;
     }
 
-    locations = mgcf->locations->elts;
+    blocks = mgcf->blocks->elts;
 
     // Exact match
-    for (i = 0; i < mgcf->locations->nelts; i++)
+    for (i = 0; i < mgcf->blocks->nelts; i++)
     {
-        if (locations[i].slave_id == slave_id)
+        if (blocks[i].slave_id == slave_id)
         {
-            return &locations[i];
+            return &blocks[i];
         }
     }
 
@@ -517,6 +422,129 @@ static ngx_stream_modbus_proxy_loc_conf_t *ngx_stream_modbus_proxy_find_location
     return mgcf->default_location;
 }
 
+// Preread-phase handler: peek the Modbus TCP MBAP header to pick a backend.
+//
+// The MBAP header is 7 bytes; byte 6 is the unit (slave) id. We read it from
+// the preread buffer that nginx fills for us, WITHOUT consuming it, so the
+// full frame is still forwarded upstream by the proxy module. The chosen
+// backend is stashed in the per-session ctx for the $modbus_backend variable.
+static ngx_int_t ngx_stream_modbus_proxy_preread(ngx_stream_session_t *s)
+{
+    ngx_connection_t *c = s->connection;
+    ngx_stream_modbus_proxy_srv_conf_t *mgcf;
+    ngx_stream_modbus_proxy_loc_conf_t *loc;
+    ngx_stream_modbus_proxy_ctx_t *ctx;
+    ngx_uint_t slave_id;
+    ngx_uint_t op_code;
+
+    ctx = ngx_stream_get_module_ctx(s, ngx_stream_modbus_proxy_module);
+    if (ctx != NULL)
+    {
+        // Backend already chosen on an earlier preread invocation.
+        return NGX_OK;
+    }
+
+    mgcf = ngx_stream_get_module_srv_conf(s, ngx_stream_modbus_proxy_module);
+    if (mgcf == NULL)
+    {
+        return NGX_OK;
+    }
+
+    // Wait until the 7-byte MBAP header is fully buffered.
+    if (c->buffer == NULL || (size_t)(c->buffer->last - c->buffer->pos) < 8)
+    {
+        return NGX_AGAIN;
+    }
+
+    op_code = c->buffer->pos[7];
+    slave_id = c->buffer->pos[6];
+
+    loc = ngx_stream_modbus_proxy_find_location(mgcf, slave_id);
+    if (loc == NULL)
+    {
+        ngx_log_error(NGX_LOG_ERR, c->log, 0,
+                      "modbus_proxy: no backend for slave_id=%ui", slave_id);
+        return NGX_STREAM_BAD_GATEWAY;
+    }
+
+    // Reject denied function codes before forwarding (applies to both tcp and
+    // rtu modes). deny_ops is a bitmask keyed by function code; strip the high
+    // exception bit defensively. NGX_STREAM_FORBIDDEN (403) closes the session.
+    if (loc->deny_ops & NGX_MODBUS_OP(op_code & 0x7f))
+    {
+        ngx_log_error(NGX_LOG_ERR, c->log, 0,
+                      "modbus_proxy: denied op 0x%02Xi for slave_id=%ui",
+                      op_code, slave_id);
+        return NGX_STREAM_FORBIDDEN;
+    }
+
+    // "mode rtu": bridge to a serial port ourselves. We take over the client
+    // connection and return NGX_DONE so the TCP proxy content handler is never
+    // reached (see ngx_stream_core_preread_phase). The tcp path below is
+    // unchanged and still returns NGX_OK.
+#if (NGX_STREAM_MODBUS_RTU)
+    if (ngx_strcmp(loc->mode.data, "rtu") == 0)
+    {
+        return ngx_stream_modbus_rtu_takeover(s, c, loc);
+    }
+#endif
+
+    // tcp mode: a backend host is required; the proxy module forwards via $proxy_pass.
+    if (loc->proxy_pass.len == 0)
+    {
+        ngx_log_error(NGX_LOG_ERR, c->log, 0,
+                      "modbus_proxy: no backend for slave_id=%ui", slave_id);
+        return NGX_STREAM_BAD_GATEWAY;
+    }
+
+    ctx = ngx_pcalloc(c->pool, sizeof(ngx_stream_modbus_proxy_ctx_t));
+    if (ctx == NULL)
+    {
+        return NGX_ERROR;
+    }
+
+    ctx->loc_conf = loc;
+    ngx_stream_set_ctx(s, ctx, ngx_stream_modbus_proxy_module);
+
+    ngx_log_debug3(NGX_LOG_DEBUG_STREAM, c->log, 0,
+                   "##### modbus_proxy: slave_id=%ui -> %V, func code: %X",
+                   slave_id, &loc->proxy_pass, op_code);
+    ngx_log_debug1(NGX_LOG_DEBUG_STREAM, c->log, 0,
+                   "#### modbus_proxy: mode=%V",
+                   &loc->mode);
+
+    // Arm the absolute session-duration timer for this backend, if configured.
+    if (loc->timeout)
+    {
+        ngx_event_t *tev;
+        ngx_pool_cleanup_t *cln;
+
+        tev = ngx_pcalloc(c->pool, sizeof(ngx_event_t));
+        if (tev == NULL)
+        {
+            return NGX_ERROR;
+        }
+
+        tev->handler = ngx_stream_modbus_proxy_timeout_handler;
+        tev->data = s;
+        tev->log = c->log;
+
+        // Ensure the timer is cancelled if the session closes on its own first.
+        cln = ngx_pool_cleanup_add(c->pool, 0);
+        if (cln == NULL)
+        {
+            return NGX_ERROR;
+        }
+        cln->handler = ngx_stream_modbus_proxy_cleanup_timer;
+        cln->data = tev;
+
+        ngx_add_timer(tev, loc->timeout);
+    }
+
+    return NGX_OK;
+}
+
+#if (NGX_STREAM_MODBUS_RTU)
 // ============================================================================
 // Modbus RTU (serial) bridge  --  "mode rtu"
 //
@@ -936,6 +964,7 @@ ngx_stream_modbus_rtu_takeover(ngx_stream_session_t *s, ngx_connection_t *c,
 
     return NGX_DONE;
 }
+#endif // NGX_STREAM_MODBUS_RTU
 
 // $modbus_backend: returns the backend selected during the preread phase.
 static ngx_int_t ngx_stream_modbus_proxy_variable(ngx_stream_session_t *s,
@@ -971,7 +1000,7 @@ static void *ngx_stream_modbus_proxy_create_srv_conf(ngx_conf_t *cf)
         return NULL;
     }
 
-    mgcf->locations = NULL;
+    mgcf->blocks = NULL;
     mgcf->default_location = NULL;
 
     // Generic setters treat 0 as "already set"; seed UNSET sentinels so the
@@ -980,7 +1009,9 @@ static void *ngx_stream_modbus_proxy_create_srv_conf(ngx_conf_t *cf)
     mgcf->data_bits = NGX_CONF_UNSET_UINT;
     mgcf->stop_bits = NGX_CONF_UNSET_UINT;
     mgcf->resp_timeout = NGX_CONF_UNSET_MSEC;
+#if (NGX_STREAM_MODBUS_RTU)
     mgcf->mb = NULL;
+#endif
 
     return mgcf;
 }
@@ -989,12 +1020,12 @@ static char *ngx_stream_modbus_proxy_merge_srv_conf(ngx_conf_t *cf, void *parent
 {
     ngx_stream_modbus_proxy_srv_conf_t *prev = parent;
     ngx_stream_modbus_proxy_srv_conf_t *conf = child;
-    ngx_stream_modbus_proxy_loc_conf_t *locations;
+    ngx_stream_modbus_proxy_loc_conf_t *blocks;
     ngx_uint_t i;
 
-    if (conf->locations == NULL)
+    if (conf->blocks == NULL)
     {
-        conf->locations = prev->locations;
+        conf->blocks = prev->blocks;
         conf->default_location = prev->default_location;
     }
 
@@ -1020,12 +1051,12 @@ static char *ngx_stream_modbus_proxy_merge_srv_conf(ngx_conf_t *cf, void *parent
     }
 
     // If any modbus block on this server is rtu, a serial device is required.
-    if (conf->serial.len == 0 && conf->locations != NULL)
+    if (conf->serial.len == 0 && conf->blocks != NULL)
     {
-        locations = conf->locations->elts;
-        for (i = 0; i < conf->locations->nelts; i++)
+        blocks = conf->blocks->elts;
+        for (i = 0; i < conf->blocks->nelts; i++)
         {
-            if (ngx_strcmp(locations[i].mode.data, "rtu") == 0)
+            if (ngx_strcmp(blocks[i].mode.data, "rtu") == 0)
             {
                 return "a \"mode rtu\" modbus block requires a server-level "
                        "\"serial\" directive";
