@@ -24,8 +24,8 @@ ngx_module_srcs="$ngx_addon_dir/ngx_stream_modbus_proxy_module.c"
 # ngx_module_libs: libraries to link. For a DYNAMIC module these are linked
 #                  into the .so itself (auto/module -> *_LIBS -> auto/make).
 # Resolved via pkg-config when available, with a sane fallback.
-# ngx_module_incs="$(pkg-config --cflags-only-I libmodbus 2>/dev/null | sed -e 's/-I//g')"
-# ngx_module_libs="$(pkg-config --libs libmodbus 2>/dev/null || echo -lmodbus)"
+ngx_module_incs="$(pkg-config --cflags-only-I libmodbus 2>/dev/null | sed -e 's/-I//g')"
+ngx_module_libs="$(pkg-config --libs libmodbus 2>/dev/null || echo -lmodbus)"
 
 # process options in config file
 . auto/module
